@@ -1,4 +1,4 @@
-import { redis, applyOps, COLS } from '../lib/store.js';
+import { redis, applyOps, resetAll, readAll, COLS } from '../lib/store.js';
 import { isAdminRequest, readBody } from '../lib/auth.js';
 
 const ID = /^[A-Za-z0-9_\-.~:@+]{1,200}$/;
@@ -12,7 +12,20 @@ export default async function handler(req, res) {
   if (!redis) return res.status(500).json({ error: 'Storage isn’t connected.' });
   if (!isAdminRequest(req)) return res.status(401).json({ error: 'Admin session expired.' });
 
-  const { ops } = readBody(req);
+  const body = readBody(req);
+
+  // Full reset: delete everything server-side, not just the records this browser knows about.
+  if (body.reset === true) {
+    try {
+      const ver = await resetAll();
+      return res.status(200).json({ ok: true, ver, state: await freshState(ver) });
+    } catch (e) {
+      console.error(e);
+      return res.status(500).json({ error: 'Couldn’t reset the tournament.' });
+    }
+  }
+
+  const { ops } = body;
   if (!Array.isArray(ops) || ops.length === 0 || ops.length > MAX_OPS) {
     return res.status(400).json({ error: `send between 1 and ${MAX_OPS} changes` });
   }
@@ -32,9 +45,21 @@ export default async function handler(req, res) {
 
   try {
     const ver = await applyOps(clean);
-    return res.status(200).json({ ok: true, ver });
+    return res.status(200).json({ ok: true, ver, state: await freshState(ver) });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: 'Couldn’t save the change.' });
+  }
+}
+
+// Read back right after the write (same client, so it sees its own write) and send the
+// authoritative copy to the admin's browser. If a lagging replica returns an older
+// version, send nothing and let the next refresh pick it up.
+async function freshState(ver) {
+  try {
+    const state = await readAll();
+    return state.ver >= ver ? state : null;
+  } catch {
+    return null;
   }
 }

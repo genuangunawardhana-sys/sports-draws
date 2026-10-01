@@ -15,6 +15,18 @@ export const redis = url && token
 const PREFIX = process.env.STORE_PREFIX || 'pb';
 export const key = (name) => `${PREFIX}:${name}`;
 
+// HGETALL comes back as a flat [field, value, field, value, ...] array when automatic
+// deserialization is off, and as an object otherwise. Accept both.
+const toRecord = (r) => {
+  if (!r) return {};
+  if (Array.isArray(r)) {
+    const o = {};
+    for (let i = 0; i + 1 < r.length; i += 2) o[r[i]] = r[i + 1];
+    return o;
+  }
+  return r;
+};
+
 const parse = (v) => {
   if (v == null) return null;
   if (typeof v === 'object') return v;
@@ -35,7 +47,7 @@ export async function readAll() {
   const out = {};
   COLS.forEach((c, i) => {
     const docs = {};
-    for (const [id, raw] of Object.entries(r[i] || {})) {
+    for (const [id, raw] of Object.entries(toRecord(r[i]))) {
       const v = parse(raw);
       if (v) docs[id] = v;
     }
@@ -59,6 +71,16 @@ export async function applyOps(ops) {
       m.hset(key(o.col), { [o.id]: JSON.stringify(o.data) });
     }
   }
+  m.incr(key('ver'));
+  const r = await m.exec();
+  return Number(r[r.length - 1]);
+}
+
+// Wipes every team, group, score, bracket and setting in one atomic step.
+export async function resetAll() {
+  const m = redis.multi();
+  COLS.forEach((c) => m.del(key(c)));
+  m.del(key('meta'));
   m.incr(key('ver'));
   const r = await m.exec();
   return Number(r[r.length - 1]);

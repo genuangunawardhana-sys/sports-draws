@@ -357,25 +357,33 @@ async function api(path,body){
   if(!res.ok){const err=new Error((j&&j.error)||'Request failed'); err.status=res.status; throw err;}
   return j;
 }
-function send(ops){
+function applyState(j){
+  COLS.forEach(c=>{S[c]=j[c]||{};}); S.meta=j.meta||{}; ver=j.ver||0;
+  if(!booted){booted=true; render();} else scheduleRender();
+}
+function send(body){
   pendingWrites++;
-  const p=sendChain.then(()=>api('/api/write',{ops})).catch(handleErr).finally(()=>{pendingWrites--; writeEpoch++;});
+  const p=sendChain.then(()=>api('/api/write',body)).then(r=>{
+    // Only the last queued write applies the server's copy, so later optimistic edits aren't undone.
+    if(r&&r.state&&pendingWrites===1&&(r.state.ver||0)>=ver) applyState(r.state);
+    return r;
+  }).catch(handleErr).finally(()=>{pendingWrites--; writeEpoch++;});
   sendChain=p; return p;
 }
 function put(col,id,data){
   if(col==='meta') S.meta=data; else S[col][id]=data;
-  render(); return send([{col,id,data}]);
+  render(); return send({ops:[{col,id,data}]});
 }
 function del(col,id){
   if(col==='meta') S.meta={}; else delete S[col][id];
-  render(); return send([{col,id,del:true}]);
+  render(); return send({ops:[{col,id,del:true}]});
 }
 async function writeMany(ops,label){
   for(let i=0;i<ops.length;i+=150){
-    await send(ops.slice(i,i+150));
+    await send({ops:ops.slice(i,i+150)});
     if(label) toast(label+' '+Math.min(ops.length,i+150)+' of '+ops.length,true);
   }
-  toast('Done'); poll(true);
+  toast('Done');
 }
 let lastErr=0;
 function handleErr(e){
@@ -383,6 +391,7 @@ function handleErr(e){
   if(st===401){setToken(null); render(); toast('Admin session ended. Unlock admin again to keep editing.'); poll(true); return;}
   const now=Date.now(); if(now-lastErr<2500) return; lastErr=now;
   if(st===400||st===413) toast('That change couldn’t be saved: '+(e.message||'invalid data')+'.');
+  else if(st) toast('Save failed ('+st+'): '+(e.message||'server error'));
   else toast('A change didn’t save. Check your connection and try again.');
   poll(true);
 }
@@ -418,7 +427,7 @@ function body(){if(view==='settings'&&!isAdmin) view='groups'; return view==='co
 function empty(title,text,btn){return `<div class="empty"><h3>${esc(title)}</h3><p>${esc(text)}</p>${btn||''}</div>`;}
 function viewWelcome(){
   if(!isAdmin) return `<div class="empty"><h3>The draw isn’t posted yet</h3><p>Groups, court assignments and scores will show up here once the organizers set up the tournament.</p></div>`;
-  return `<div class="empty"><h3>Set up your tournament</h3><p>Load a sample with 40 teams across both divisions to see how scoring, courts and playoffs work. Or start empty and add your own teams.</p><div class="row"><button class="btn" data-act="sample">Load sample tournament</button><button class="btn ghost" data-act="start">Start empty</button></div></div>`;
+  return `<div class="empty"><h3>Set up your tournament</h3><p>Load a practice tournament with made-up teams to see how scoring, courts and playoffs work. Or start empty and add your own teams.</p><div class="row"><button class="btn" data-act="sample">Load sample tournament</button><button class="btn ghost" data-act="start">Start empty</button></div></div>`;
 }
 
 function matchCard(o){
@@ -560,16 +569,19 @@ function viewSettings(){
     <div class="row"><button class="btn ghost" data-act="adddiv">Add division</button></div>
   </div>
   <div class="form"><h3>Admin access</h3><p class="muted" style="margin:0">Score keepers tap Admin and enter the admin password. To change it, update ADMIN_PASSWORD in your Vercel project’s environment variables and redeploy. Changing it signs every admin out.</p></div>
-  <div class="form"><h3>Sample data and reset</h3><p class="muted" style="margin:0">Load the 40-team sample to rehearse, then reset before the event starts.</p><div class="row"><button class="btn ghost" data-act="sample">Load sample tournament</button><button class="btn ghost danger" data-act="reset">Reset everything</button></div></div>`;
+  <div class="form"><h3>Sample data and reset</h3><p class="muted" style="margin:0">Load a practice tournament with made-up teams to rehearse, then reset before the event starts.</p><div class="row"><button class="btn ghost" data-act="sample">Load sample tournament</button><button class="btn ghost danger" data-act="reset">Reset everything</button></div></div>`;
 }
 
 /* ---------- dialogs ---------- */
 function show(html){dlg.innerHTML=html; if(!dlg.open) dlg.showModal(); const f=dlg.querySelector('input:not([type=hidden])'); if(f&&modal&&modal.kind!=='pool'&&modal.kind!=='po') f.focus();}
 function close(){modal=null; if(dlg.open) dlg.close();}
 function askConfirm(msg,ok){return new Promise(res=>{
-  cfm.innerHTML=`<div class="sheet"><p style="margin:0">${esc(msg)}</p><div class="actions"><button class="btn ghost" data-v="0">Cancel</button><button class="btn danger" data-v="1">${esc(ok)}</button></div></div>`;
-  const h=e=>{const b=e.target.closest('button[data-v]'); if(!b) return; cfm.removeEventListener('click',h); cfm.close(); res(b.dataset.v==='1');};
-  cfm.addEventListener('click',h); cfm.addEventListener('cancel',()=>{cfm.removeEventListener('click',h); res(false);},{once:true}); cfm.showModal();});}
+  if(dlg.open) dlg.close();
+  cfm.innerHTML=`<form method="dialog" class="sheet"><p style="margin:0">${esc(msg)}</p><div class="actions"><button class="btn ghost" value="no">Cancel</button><button class="btn danger" value="yes">${esc(ok)}</button></div></form>`;
+  cfm.returnValue='';
+  cfm.addEventListener('close',()=>res(cfm.returnValue==='yes'),{once:true});
+  cfm.showModal();
+});}
 function courtOptions(sel,def){const m=meta(); let o=def!==undefined?`<option value="">${def?'Group default (court '+def+')':'No court'}</option>`:`<option value="">No court</option>`; for(let c=1;c<=m.courts;c++) o+=`<option value="${c}" ${sel===c?'selected':''}>Court ${c}</option>`; return o;}
 function side(t,f,v){const n=t?t.name:'TBD'; return `<div class="side"><div class="who"><strong>${esc(n)}</strong><span>${esc(players(t))}</span></div><div class="stepper"><button type="button" data-act="dec" data-f="${f}" aria-label="Lower score for ${esc(n)}">−</button><input name="${f}" type="number" inputmode="numeric" min="0" max="99" value="${num(v)?v:''}" aria-label="Score for ${esc(n)}"><button type="button" data-act="inc" data-f="${f}" aria-label="Raise score for ${esc(n)}">+</button></div></div>`;}
 function scoreForm(title,A,B,sa,sb,courtSel){
@@ -593,12 +605,21 @@ function pwForm(){
   modal={kind:'pw'};
   show(`<form class="sheet" data-form="pw"><h3>Admin access</h3><p class="muted" style="margin:0">For score keepers and organizers.</p><label class="field">Password<input name="pw" type="password" autocomplete="current-password" required></label><p class="err" hidden></p><div class="actions"><button type="button" class="btn ghost" data-act="close">Cancel</button><button class="btn" type="submit">Unlock</button></div></form>`);
 }
+function matchesPerRound(size){return Math.floor((Number(size)||0)/2);}
+function courtHint(size){const n=matchesPerRound(size); return `Matches in each round fill these courts in order. A group of ${size} plays ${n} match${n===1?'':'es'} at a time, so give it ${n} court${n===1?'':'s'}.`;}
+// First courts not already used by another group in this division, wrapping within the court count.
+function suggestCourts(size,exceptId){
+  const total=meta().courts, need=matchesPerRound(size), used=new Set();
+  groupsIn(curDiv).forEach(g=>{if(g.id!==exceptId)(g.courts||[]).forEach(c=>used.add(c));});
+  const out=[]; for(let c=1;c<=total&&out.length<need;c++) if(!used.has(c)) out.push(c);
+  return out.length===need?out:[];
+}
 function groupForm(g){
   const isNew=!g.id; modal={kind:'group',id:g.id||null};
   show(`<form class="sheet" data-form="group"><h3>${isNew?'Add a group':'Edit group '+esc(g.name)}</h3>
   <div class="two"><label class="field">Group name<input name="name" value="${esc(g.name)}" maxlength="12" required></label>
   <label class="field">Teams in group<select name="size">${[3,4,5,6,7,8].map(n=>`<option value="${n}" ${n===g.size?'selected':''}>${n}</option>`).join('')}</select></label></div>
-  <label class="field">Courts for this group<input name="courts" value="${esc((g.courts||[]).join(', '))}" placeholder="For example: 1, 2"><small>Matches in each round fill these courts in order. Use 2 courts for 4 or 5 teams, 3 courts for 6.</small></label>
+  <label class="field">Courts for this group<input name="courts" value="${esc((g.courts||[]).join(', '))}" placeholder="${esc(suggestCourts(g.size,g.id).join(', ')||'Court numbers, separated by commas')}"><small id="courthint">${courtHint(g.size)}</small></label>
   <p class="err" hidden></p>
   <div class="actions">${isNew?'':'<button type="button" class="btn ghost danger" data-act="delgroup">Delete group</button>'}<button type="button" class="btn ghost" data-act="close">Cancel</button><button class="btn" type="submit">${isNew?'Add group':'Save group'}</button></div></form>`);
 }
@@ -635,10 +656,12 @@ dlg.addEventListener('click',async e=>{
   if(act==='delteam'&&modal){
     const id=modal.id, t=S.teams[id]; close();
     if(!(await askConfirm(`Delete ${t.name}? Their pool scores stop counting.`,'Delete team'))) return;
-    del('teams',id); toast('Team deleted');
+    const ops=[{col:'teams',id,del:true}];
+    Object.keys(S.matches).forEach(k=>{const m=S.matches[k]; if(m.a===id||m.b===id){ops.push({col:'matches',id:k,del:true}); delete S.matches[k];}});
+    delete S.teams[id]; render(); await send({ops}); toast('Team deleted');
   }
 });
-dlg.addEventListener('change',e=>{if(e.target.name==='div'){const g=dlg.querySelector('select[name=group]'); g.innerHTML=groupOpts(e.target.value,'');}});
+dlg.addEventListener('change',e=>{if(e.target.name==='size'&&modal&&modal.kind==='group'){const h=dlg.querySelector('#courthint'); if(h) h.textContent=courtHint(e.target.value); const c=dlg.querySelector('input[name=courts]'); if(c){const sg=suggestCourts(Number(e.target.value),modal.id); c.placeholder=sg.join(', ')||'Court numbers, separated by commas'; if(!modal.id&&c.dataset.auto==='1') c.value=sg.join(', ');}} if(e.target.name==='div'){const g=dlg.querySelector('select[name=group]'); g.innerHTML=groupOpts(e.target.value,'');}});
 dlg.addEventListener('submit',async e=>{
   e.preventDefault(); const f=e.target, fd=new FormData(f), kind=f.dataset.form;
   if(kind==='pw'){
@@ -688,7 +711,7 @@ app.addEventListener('click',async e=>{
   if(!isAdmin) return;
   if(act==='start'){put('meta','config',Object.assign(meta(),{started:true})); view='teams'; saveUI(); render(); return;}
   if(act==='scoring'){put('meta','config',Object.assign(meta(),{scoring:d.v,started:true})); return;}
-  if(act==='addgroup'){groupForm({name:nextLetter(curDiv),size:4,courts:[]}); return;}
+  if(act==='addgroup'){const gs=groupsIn(curDiv), size=gs.length?gs[gs.length-1].size:4; groupForm({name:nextLetter(curDiv),size,courts:suggestCourts(size)}); const c=dlg.querySelector('input[name=courts]'); if(c){c.dataset.auto='1'; c.addEventListener('input',()=>{c.dataset.auto='0';},{once:true});} return;}
   if(act==='editgroup'){groupForm(Object.assign({id:d.id},S.groups[d.id])); return;}
   if(act==='addteam'){const gs=groupsIn(curDiv), open=gs.find(g=>members(g.id).length<g.size); teamForm({div:curDiv,group:open?open.id:''}); return;}
   if(act==='editteam'){teamForm(Object.assign({id:d.id},S.teams[d.id])); return;}
@@ -756,18 +779,16 @@ async function seedBracket(){
   toast(`Bracket created with ${q.count} teams`);
 }
 async function resetAll(){
-  const ops=[]; COLS.forEach(c=>Object.keys(S[c]).forEach(id=>ops.push({col:c,id,del:true})));
-  ops.push({col:'meta',id:'config',del:true});
   COLS.forEach(c=>S[c]={}); S.meta={}; render();
-  await writeMany(ops,'Clearing');
-  toast('Everything was reset');
+  const r=await send({reset:true});
+  if(r&&r.ok) toast('Everything was reset');
 }
 
 /* ---------- sample ---------- */
 async function loadSample(){
   if(Object.keys(S.teams).length&&!(await askConfirm('Loading the sample replaces all current teams, groups and scores.','Replace with sample'))) return;
-  const old=[]; COLS.forEach(c=>Object.keys(S[c]).forEach(id=>old.push({col:c,id,del:true})));
   COLS.forEach(c=>S[c]={});
+  send({reset:true});
   const names={blue:['Dink Dynasty','Kitchen Kings','Net Ninjas','Lob Squad','Paddle Pals','Third Shot Drop','Volley Llamas','Spin Doctors','Erne Express','Baseline Bandits','Rally Rebels','Drop Shot Divas','The Picklers','Sweet Spot','Court Jesters','Dill With It','Big Dill Energy','Zero Zero Start','Two Bounce Crew','Soft Hands'],
     gold:['Golden Paddles','Sunny Side Dinks','Honey Badgers','Gold Rush','Brine Time','Pickle Pros','Fresh Pickles','Kitchen Crashers','Slice Squad','Lucky Lobs','Dink Responsibly','Pickle Jar','Net Gains','Overhead Heroes','Rookie Rally','Paddle Royale','The Gherkins','Sour Power','Good Dills','First Serve']};
   const first=['Maya','Jordan','Priya','Sam','Elena','Marcus','Grace','Leo','Aisha','Tom','Nina','Chris','Olivia','Dev','Hannah','Ray','Sofia','Ben','Jade','Luis'];
@@ -776,14 +797,14 @@ async function loadSample(){
   const ops=[]; let k=0, order=Date.now();
   SAMPLE_DIVS.forEach((d,di)=>{
     const gids=[];
-    for(let gi=0;gi<5;gi++){const id=uid()+gi+d; gids.push(id); const g={div:d,name:'ABCDE'[gi],size:4,courts:[gi*2+1,gi*2+2],order:order++}; S.groups[id]=g; ops.push({col:'groups',id,data:g});}
+    for(let gi=0;gi<5;gi++){const id=uid()+gi+d; gids.push(id); const C=meta().courts, g={div:d,name:'ABCDE'[gi],size:4,courts:[(gi*2)%C+1,(gi*2+1)%C+1],order:order++}; S.groups[id]=g; ops.push({col:'groups',id,data:g});}
     names[d].forEach((n,i)=>{const id=uid()+i+d; const t={name:n,p1:`${first[(i*3+di)%20]} ${last[(i*7+di*3)%20]}.`,p2:`${first[(i*3+di+11)%20]} ${last[(i*5+di+9)%20]}.`,div:d,group:gids[i%5],order:order++}; S.teams[id]=t; ops.push({col:'teams',id,data:t});});
   });
   // fill some results: Blue rounds 1-2, Gold round 1
   SAMPLE_DIVS.forEach(d=>groupsIn(d).forEach(g=>{const rr=rrRounds(members(g.id).map(t=>t.id)); rr.slice(0,d==='blue'?2:1).forEach(pairs=>pairs.forEach(([a,b])=>{const w=rnd()<.5, lo=3+Math.floor(rnd()*8); const sa=w?11:lo, sb=w?lo:11, sw=a>b; const doc={group:g.id,a:sw?b:a,b:sw?a:b,sa:sw?sb:sa,sb:sw?sa:sb,court:null}; const key=mkey(g.id,a,b); S.matches[key]=doc; ops.push({col:'matches',id:key,data:doc});}));}));
   S.meta=Object.assign(meta(),{started:true,divisions:DEF_DIVS.map(d=>Object.assign({},d))}); ops.push({col:'meta',id:'config',data:S.meta});
   view='groups'; saveUI(); render();
-  await writeMany(old.concat(ops),'Saving sample');
+  await writeMany(ops,'Saving sample');
 }
 
 /* ---------- boot ---------- */
@@ -796,8 +817,8 @@ async function poll(force){
     if(!r.ok||!j) throw new Error((j&&j.error)||'Server error.');
     if(j.unchanged) return;
     if(pendingWrites||epoch!==writeEpoch) return;
-    COLS.forEach(c=>{S[c]=j[c]||{};}); S.meta=j.meta||{}; ver=j.ver||0;
-    if(!booted){booted=true; render();} else scheduleRender();
+    if(booted&&(j.ver||0)<ver) return;
+    applyState(j);
   }catch(e){
     if(!booted) app.innerHTML='<div class="wrap loading">Can’t reach the tournament server yet. '+esc(e.message||'')+' Retrying…</div>';
   }

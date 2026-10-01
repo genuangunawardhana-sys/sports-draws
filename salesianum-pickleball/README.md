@@ -36,7 +36,7 @@ Command-line alternative: `npm i -g vercel`, then `vercel` in this folder. Add R
 npm install
 vercel link
 vercel env pull .env.development.local
-vercel dev
+vercel dev   # run from this folder
 ```
 
 ## Day-of tips
