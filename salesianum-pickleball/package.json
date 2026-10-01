@@ -1,0 +1,14 @@
+{
+  "name": "salesianum-pickleball",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Round robin, court board and playoff tracker for the Salesianum Tennis pickleball FUNraiser.",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.34.0"
+  }
+}
